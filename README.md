@@ -1,4 +1,4 @@
-# google-photos-dedupe
+# Google Photos Takeout Deduplicator
 
 Herramienta para **detectar y consolidar fotos/videos duplicados** de múltiples exportaciones de **Google Takeout (Google Photos)**.  
 Soporta detección por **hash exacto** (SHA256) y por **hash perceptual** (pHash) para encontrar duplicados “visualmente iguales”.

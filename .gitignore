@@ -5,18 +5,16 @@ EXPORTS/
 EXPORT*/
 
 # --- Outputs generados ---
-output*/
-output*/
-OUTPUT*/
-OUTPUT*/
 output/
-OUTPUT/
-
-# Por si hay salidas con nombres tipo "output_consolidado_struct"
+output*/
 output_*/
+OUTPUT/
+OUTPUT*/
 OUTPUT_*/
 
-# --- Reportes y logs generados (si querés extra seguridad) ---
+# --- Reportes y logs generados ---
+REPORTS/
+LOGS/
 **/REPORTS/
 **/LOGS/
 *.log
