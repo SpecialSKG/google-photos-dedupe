@@ -1,0 +1,36 @@
+# --- Datos de Google Takeout / exports ---
+exports/
+export*/
+EXPORTS/
+EXPORT*/
+
+# --- Outputs generados ---
+output*/
+output*/
+OUTPUT*/
+OUTPUT*/
+output/
+OUTPUT/
+
+# Por si hay salidas con nombres tipo "output_consolidado_struct"
+output_*/
+OUTPUT_*/
+
+# --- Reportes y logs generados (si querés extra seguridad) ---
+**/REPORTS/
+**/LOGS/
+*.log
+
+# --- Archivos potencialmente sensibles ---
+config.yaml
+*.env
+.env
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+env/
+.pytest_cache/
+.mypy_cache/

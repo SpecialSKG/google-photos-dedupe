@@ -1,0 +1,86 @@
+# config.example.yaml
+# Ejemplo de configuración para "google-photos-dedupe"
+#
+# IDEA CLAVE:
+# - "inputs" es una lista ordenada.
+# - El PRIMER input (inputs[0]) se considera la cuenta/carpeta principal (prioridad).
+#   Esto ayuda a que, ante duplicados, normalmente se conserve como "winner" el archivo
+#   proveniente de la cuenta principal (dependiendo de la lógica de tu deduplicador).
+#
+# Estructura sugerida (rutas relativas al proyecto):
+#
+#   <TU_PROYECTO>/
+#     config.example.yaml
+#     exports/
+#       account_primary/
+#         Takeout/
+#           Google Photos/
+#             ... (carpetas y archivos)
+#       account_secondary_01/
+#         Takeout/
+#           Google Photos/
+#             ...
+#       account_secondary_02/
+#         Takeout/
+#           Google Photos/
+#             ...
+#
+# Ejecución:
+#   python -m photos_dedupe --config config.yaml
+#
+# NOTA:
+# - No subas config.yaml real al repo (contiene rutas/correos reales).
+# - Mantén "out_dir" fuera de "exports/" para evitar re-escaneo.
+
+# INPUTS (ordenados) - el primero es el principal
+inputs:
+  - "exports/account_primary"
+  - "exports/account_secondary_01"
+  - "exports/account_secondary_02"
+
+# Salida (NO dentro de exports/)
+out_dir: "output_consolidado"
+
+# exact | perceptual | exact+perceptual
+mode: "exact+perceptual"
+
+# copy | move | dry-run
+# Recomendación: copy para mantener backups intactos
+action: "copy"
+
+# Perceptual hash threshold (más bajo = más estricto)
+phash_threshold: 6
+
+# Workers/hilos
+workers: 6
+
+# Si es true, replica subcarpetas del origen dentro de la salida
+keep_structure: true
+
+# Ignorar sidecars JSON como "archivos multimedia" (igual se usan para fechas si aplica)
+ignore_json: true
+
+# Si quieres forzar ruta interna del Takeout (si la autodetección falla):
+# photos_subpath: "Takeout/Google Photos"
+
+# === ORGANIZACIÓN POR AÑO (v3) ===
+group_by_year: true
+unknown_year_dir: "_UNKNOWN"
+
+# Prioridad de origen de fecha:
+# - takeout_json: JSON del Takeout (ideal para fotos y videos)
+# - exif: metadata interna de imagen
+# - mtime: fecha de modificación del archivo como fallback
+date_source_priority:
+  - "takeout_json"
+  - "exif"
+  - "mtime"
+
+# local | utc  (según cómo quieras interpretar timestamps)
+timezone_mode: "local"
+
+# === REPORTES ===
+reports:
+  csv: true
+  json: true
+  xlsx: true
