@@ -1,4 +1,6 @@
 """
+utils.py
+
 Utility functions for file operations and metadata extraction.
 """
 
@@ -36,14 +38,15 @@ def calculate_sha256(file_path: str, chunk_size: int = 8192) -> str:
     return sha256_hash.hexdigest()
 
 
-def safe_copy(src: str, dst: str, keep_structure: bool = False) -> str:
+def safe_copy(src: str, dst: str, keep_structure: bool = False, root_dir: Optional[str] = None) -> str:
     """
-    Safely copy a file to destination, handling name collisions.
+    Safely copy a file to destination, handling name collisions and optional directory structure.
     
     Args:
         src: Source file path
         dst: Destination directory
         keep_structure: Whether to preserve subdirectory structure
+        root_dir: Base root directory for calculating relative structure
         
     Returns:
         Final destination path of the copied file
@@ -51,6 +54,13 @@ def safe_copy(src: str, dst: str, keep_structure: bool = False) -> str:
     dst_path = Path(dst)
     src_path = Path(src)
     
+    if keep_structure and root_dir:
+        try:
+            rel = src_path.resolve().relative_to(Path(root_dir).resolve())
+            dst_path = dst_path / rel.parent
+        except Exception:
+            pass
+
     # Create destination directory if it doesn't exist
     dst_path.mkdir(parents=True, exist_ok=True)
     
@@ -69,14 +79,15 @@ def safe_copy(src: str, dst: str, keep_structure: bool = False) -> str:
     return str(final_path)
 
 
-def safe_move(src: str, dst: str, keep_structure: bool = False) -> str:
+def safe_move(src: str, dst: str, keep_structure: bool = False, root_dir: Optional[str] = None) -> str:
     """
-    Safely move a file to destination, handling name collisions.
+    Safely move a file to destination, handling name collisions and optional directory structure.
     
     Args:
         src: Source file path
         dst: Destination directory
         keep_structure: Whether to preserve subdirectory structure
+        root_dir: Base root directory for calculating relative structure
         
     Returns:
         Final destination path of the moved file
@@ -84,6 +95,13 @@ def safe_move(src: str, dst: str, keep_structure: bool = False) -> str:
     dst_path = Path(dst)
     src_path = Path(src)
     
+    if keep_structure and root_dir:
+        try:
+            rel = src_path.resolve().relative_to(Path(root_dir).resolve())
+            dst_path = dst_path / rel.parent
+        except Exception:
+            pass
+
     # Create destination directory if it doesn't exist
     dst_path.mkdir(parents=True, exist_ok=True)
     

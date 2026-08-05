@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "google-photos-dedupe"
+description = "Detecta y consolida fotos/videos duplicados de múltiples exports de Google Takeout (hash exacto y perceptual)."
+readme = "README.md"
+requires-python = ">=3.10"
+dynamic = ["version"]
+license = { text = "MIT" }
+dependencies = [
+  "colorama>=0.4.6",
+  "ImageHash>=4.3.2",
+  "numpy>=2.0.0",
+  "openpyxl>=3.1.0",
+  "pillow>=10.0.0",
+  "PyWavelets>=1.5.0",
+  "PyYAML>=6.0",
+  "scipy>=1.10.0",
+  "tqdm>=4.60.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=8.0"]
+
+[project.scripts]
+photos-dedupe = "photos_dedupe.cli:main"
+
+[tool.setuptools]
+packages = ["photos_dedupe"]
+
+[tool.setuptools.dynamic]
+version = { attr = "photos_dedupe.__version__" }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

@@ -1,4 +1,6 @@
 """
+__init__.py
+
 Google Photos Deduplication Tool
 
 Multi-account Google Photos deduplication tool with auto-detection of Takeout exports,

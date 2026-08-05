@@ -39,6 +39,8 @@ inputs:
   - "exports/account_secondary_02"
 
 # Salida (NO dentro de exports/)
+# Cada ejecución crea un subdirectorio run_<timestamp> dentro de out_dir, así no se
+# pisan los reportes/archivos de ejecuciones anteriores y sabés cuál fue la última.
 out_dir: "output_consolidado"
 
 # exact | perceptual | exact+perceptual
@@ -67,17 +69,72 @@ ignore_json: true
 group_by_year: true
 unknown_year_dir: "_UNKNOWN"
 
-# Prioridad de origen de fecha:
-# - takeout_json: JSON del Takeout (ideal para fotos y videos)
-# - exif: metadata interna de imagen
-# - mtime: fecha de modificación del archivo como fallback
+# Prioridad de origen de fecha (se auto-migra desde los nombres viejos):
+# - takeout_photo_taken_time: photoTakenTime del JSON del Takeout (ideal)
+# - exif_datetime_original: EXIF DateTimeOriginal de la imagen
+# - takeout_creation_time: creationTime del JSON (subida, no captura)
+# - filename: fecha parseada del nombre del archivo
+# - mtime: fecha de modificación del archivo (solo como fallback)
+#
+# Los nombres antiguos (takeout_json, exif, mtime) se siguen aceptando:
+# se convierten automáticamente y se deja una advertencia en el log.
 date_source_priority:
-  - "takeout_json"
-  - "exif"
+  - "takeout_photo_taken_time"
+  - "exif_datetime_original"
+  - "takeout_creation_time"
+  - "filename"
   - "mtime"
 
 # local | utc  (según cómo quieras interpretar timestamps)
 timezone_mode: "local"
+
+# === VALIDACIÓN DE FECHAS (Fase 1) ===
+# Año mínimo válido; fechas fuera de [min_valid_year, hoy + tolerancia] se rechazan.
+min_valid_year: 1970
+future_date_tolerance_days: 1
+# Dos fuentes de alta confianza que difieran más que esto (segundos) → conflicto → revisión.
+date_conflict_tolerance_seconds: 300
+# Tomar la fecha del nombre (p. ej. IMG-20221001-WA0045.jpg).
+allow_filename_date: true
+# Usar mtime como fecha de captura. Si queda false y solo hay mtime → REVIEW_DATE.
+allow_mtime_as_capture_date: false
+# review | accept — qué hacer con evidencia de baja confianza.
+low_confidence_date_policy: "review"
+
+# === POLÍTICA DE DUPLICADOS (Fase 3) ===
+# review_all: TODOS los miembros perceptuales van a REVIEW_PERCEPTUAL/ para revisar
+#             (seguro; nada se borra automáticamente).
+# legacy_winner: comportamiento anterior (winner → UNIQUE, dups → DUPLICATES_EXACT).
+perceptual_policy: "review_all"
+
+# === BUCKETS DE SALIDA (Fase 3) ===
+# UNIQUE/            → lo que te quedás (únicos + winners con fecha sólida)
+# DUPLICATES_EXACT/  → copias byte-idénticas exactas (borrables, ahorro garantizado)
+# REVIEW_PERCEPTUAL/ → candidatos perceptuales agrupados por grupo (revisión manual)
+# REVIEW_DATE/       → archivos sin evidencia de fecha sólida (mtime-only, filename-only, conflicto)
+exact_duplicates_dir: "DUPLICATES_EXACT"
+perceptual_review_dir: "REVIEW_PERCEPTUAL"
+date_review_dir: "REVIEW_DATE"
+
+# === METADATOS (Fase 6) ===
+# disabled | audit | write
+# - audit: solo inspecciona y reporta DateTimeOriginal de las copias (no requiere ExifTool).
+# - write: escribe DateTimeOriginal via ExifTool sobre las copias y verifica.
+#   Si ExifTool no está instalado y mode=write, no se escribe nada (no falla la ejecución).
+#   Detección automática: PATH + rutas estándar de Windows (winget: %LOCALAPPDATA%\Programs\ExifTool).
+metadata_mode: "audit"
+# metadata_writer: "exiftool"  # único soportado por ahora
+# metadata_write_min_confidence: 70  # confianza mínima para escribir metadata
+# metadata_failure_policy: "review"
+# verify_written_metadata: true
+# exiftool_path: "C:/ruta/a/exiftool.exe"  # opcional si no está en PATH
+
+# === CACHÉ DE HASHES (Fase 18) ===
+# Persiste SHA-256 y pHash entre corridas. Cada entrada se valida con (tamaño,
+# mtime) del archivo: si cambió, se recalcula. La primera corrida es lenta,
+# las siguientes reutilizan los hashes (≈3.5 min → segundos).
+use_hash_cache: true
+# hash_cache_file: "C:/ruta/a/cache.json"  # opcional; default <out_dir>/.photos_dedupe.hash_cache.json
 
 # === REPORTES ===
 reports:

@@ -1,4 +1,6 @@
 """
+__main__.py
+
 Entry point for running the package as a module.
 Usage: python -m photos_dedupe --config config.yaml
 """

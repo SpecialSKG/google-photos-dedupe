@@ -1,12 +1,13 @@
 # Google Photos Takeout Deduplicator
 
-Herramienta para **detectar y consolidar fotos/videos duplicados** de múltiples exportaciones de **Google Takeout (Google Photos)**.  
-Soporta detección por **hash exacto** (SHA256) y por **hash perceptual** (pHash) para encontrar duplicados “visualmente iguales”.
+Herramienta para **detectar y consolidar fotos/videos duplicados** de m�ltiples exportaciones de **Google Takeout (Google Photos)**.  
+Soporta detecci�n por **hash exacto** (SHA256) y por **hash perceptual** (pHash) para encontrar duplicados "visualmente iguales".
 
-✅ Consolida en carpetas **UNIQUE** y **DUPLICATES**  
-✅ (v3) Puede organizar la salida por **año de captura**  
-✅ Genera reportes en **CSV / JSON / XLSX (Excel)** con hojas por año  
-✅ Modo seguro **dry-run** para ver resultados sin copiar/mover archivos
+- Consolida en **buckets seguros** (`UNIQUE` / `DUPLICATES_EXACT` / `REVIEW_PERCEPTUAL` / `REVIEW_DATE`)  
+- (v3) Organiza la salida por **a�o de captura** con evidencia de fechas auditada (sidecars Takeout, EXIF, nombre, mtime)  
+- Genera reportes en **CSV / JSON / XLSX (Excel)** + **auditor�a por archivo** (`all_files_audit.csv`)  
+- Modo seguro **dry-run**: plan completo (destinos, colisiones, espacio real) sin copiar ni mover nada  
+- **Metadata opcional**: modo `audit` (default, no requiere nada) o `write` (escribe DateTimeOriginal v�a ExifTool) sobre las copias
 
 ---
 
@@ -18,13 +19,15 @@ Este proyecto:
 
 1. **Escanea** tus Takeouts  
 2. **Detecta** duplicados (exactos y/o perceptuales)  
-3. **Decide un “winner”** por grupo (el que se conserva como principal)  
-4. Copia (o mueve) a:
-   - `UNIQUE/` → lo que te vas a quedar (únicos + winners)
-   - `DUPLICATES/` → lo repetido
-5. Crea reportes para auditar lo que pasó
+3. **Construye un plan inmutable** (Fase 5): por cada archivo decide clasificaci�n, bucket, a�o, destino y colisiones, con invariantes de seguridad validadas antes de ejecutar  
+4. Copia (o mueve) seg�n el plan a:
+   - `UNIQUE/` → lo que te vas a quedar (�nicos + winners con fecha s�lida)
+   - `DUPLICATES_EXACT/` → copias byte-id�nticas (ahorro garantizado)
+   - `REVIEW_PERCEPTUAL/` → candidatos perceptuales a revisar manualmente
+   - `REVIEW_DATE/` → archivos sin evidencia de fecha s�lida (solo mtime, solo nombre, o conflicto)
+5. Crea reportes + auditor�a por archivo para auditar lo que pas�
 
----
+> **Fechas:** los grupos exactos usan la mejor evidencia de CUALQUIER copia (si una copia tiene sidecar con `photoTakenTime`, el grupo hereda esa fecha — no importa si el winner alfab�tico no la ten�a). Los grupos perceptuales NO propagan fechas entre miembros: cada uno conserva la suya y va a revisi�n.
 
 ## Requisitos
 
@@ -146,19 +149,23 @@ Si querés mantener el backup original intacto, usá `copy`.
 
 ## Salida generada
 
-En tu `out_dir` verás:
+Cada ejecución crea su propio subdirectorio `run_<timestamp>` dentro de `out_dir` (las ejecuciones nunca se pisan):
 
 ```
 output_consolidado/
-  UNIQUE/
-  DUPLICATES/
-  REPORTS/
-  LOGS/
+  run_20260803_091413/
+    UNIQUE/
+    DUPLICATES_EXACT/
+    REVIEW_PERCEPTUAL/
+    REVIEW_DATE/
+    REPORTS/
+    MANIFESTS/
+    LOGS/
 ```
 
 ### Organización por año (v3)
 
-Si activaste `group_by_year: true`, la salida queda así:
+Con `group_by_year: true`, la salida queda así:
 
 ```
 UNIQUE/
@@ -166,20 +173,24 @@ UNIQUE/
   2019/
   2020/
   _UNKNOWN/
-DUPLICATES/
+DUPLICATES_EXACT/
   2018/
   2019/
   2020/
-  _UNKNOWN/
+REVIEW_PERCEPTUAL/
+  group_000001/
+  group_000002/
 ```
 
-✅ El año se obtiene con prioridad configurable:
+El año se obtiene con prioridad configurable:
 
-1) JSON sidecar del Takeout  
-2) EXIF  
-3) mtime (fecha de modificación) como fallback
+1) `photoTakenTime` del sidecar JSON del Takeout  
+2) EXIF `DateTimeOriginal`  
+3) `creationTime` del sidecar (subida, no captura)  
+4) fecha del nombre del archivo  
+5) mtime como fallback (si `allow_mtime_as_capture_date: false`, solo mtime → `REVIEW_DATE/`)
 
-> **Importante:** para evitar que un mismo grupo se “parta”, el año del grupo se decide por el **winner** del grupo.
+> **Importante:** el año de un grupo exacto se decide por la fecha canónica del grupo (mejor evidencia de cualquier copia), así el grupo nunca se “parte”.
 
 ---
 
@@ -187,14 +198,20 @@ DUPLICATES/
 
 Se generan dentro de:
 
-`<out_dir>/REPORTS/`
+`<out_dir>/run_<timestamp>/REPORTS/`
 
-- `dedupe_report.csv` → tabla simple por duplicado
-- `dedupe_report.json` → estructura más rica por grupo
-- `dedupe_report.xlsx` → Excel con:
-  - hoja `SUMMARY`
-  - hojas por año (2018, 2019, …, _UNKNOWN)
-- `run_summary.txt` → resumen de ejecución
+- `dedupe_report.csv` → tabla por duplicado
+- `dedupe_report.json` → estructura rica por grupo
+- `dedupe_report.xlsx` → Excel con hoja `SUMMARY` y hojas por año
+- `all_files_audit.csv` → auditoría por archivo: TODOS los escaneados, con bucket, año, fuente de fecha, confianza, revisión, destino planificado y estado
+- `run_summary.txt` → resumen con buckets, estados de ejecución y **espacio real recuperable**
+
+### Manifiestos (plan inmutable)
+
+En `<out_dir>/run_<timestamp>/MANIFESTS/`:
+
+- `processing_plan.jsonl` → el plan completo (una línea JSON por archivo)
+- `run_state.json` → estado de la ejecución (errores, invariantes, resumen)
 
 ---
 
@@ -202,9 +219,47 @@ Se generan dentro de:
 
 En:
 
-`<out_dir>/LOGS/run.log`
+`<out_dir>/run_<timestamp>/LOGS/run.log`
 
 Incluye logs detallados para auditoría y troubleshooting.
+
+---
+
+## Metadata (opcional)
+
+`metadata_mode` controla la escritura de `DateTimeOriginal` sobre las **copias** (nunca toca los exports):
+
+- `audit` (default): inspecciona y reporta si cada copia tiene `DateTimeOriginal` y si coincide con la fecha determinada. No requiere ExifTool.
+- `write`: escribe `DateTimeOriginal` con **ExifTool** y verifica post-escritura. Si ExifTool no está instalado, no se escribe nada (el archivo no se pierde; se reporta `EXIFTOOL_NOT_AVAILABLE`).
+- `disabled`: no hace nada.
+
+**Instalar ExifTool (Windows, opcional pero recomendado para `write`):**
+
+```powershell
+winget install --id OliverBetz.ExifTool --exact --accept-source-agreements --accept-package-agreements
+```
+
+El binario se detecta automáticamente (PATH o rutas estándar de instalación). Si está en otro lado, usá `exiftool_path:` en el config.
+
+---
+
+## Caché de hashes (v4)
+
+SHA-256 y pHash se persisten entre corridas en `<out_dir>/.photos_dedupe.hash_cache.json`. Cada entrada se valida con (tamaño, mtime) del archivo fuente; si un archivo cambió, se recalcula. La primera corrida sobre una librería grande sigue tardando (~3.5 min de pHash), pero las siguientes reutilizan los hashes y pasan esa etapa en segundos.
+
+- Deshabilitar: `use_hash_cache: false` en el config.
+- Ruta custom: `hash_cache_file: "C:/ruta/a/cache.json"`.
+- Solo archivos inmutables entre corridas aprovechan el cache (al copiar/mover dentro de `output_*` no afecta los exports de origen).
+
+---
+
+## Estado de terminación
+
+Cada ejecución termina con un estado claro en el log:
+
+- `COMPLETED SUCCESSFULLY` (exit 0) — sin errores ni archivos en revisión.
+- `COMPLETED WITH WARNINGS` (exit 0) — hay archivos en `REVIEW_DATE/` o `REVIEW_PERCEPTUAL/` que conviene auditar.
+- `FAILED` (exit 1) — hubo operaciones que fallaron (revisá el log y `all_files_audit.csv`).
 
 ---
 
@@ -238,12 +293,16 @@ Podés:
 - subir `workers`
 - ejecutar primero en dry-run para medir
 
+En la **segunda corrida** la caché persistente de hashes elimina casi todo el tiempo de la etapa lenta (solo se revalidan los archivos por tamaño/mtime).
+
 ---
 
 ## Buenas prácticas
 
-- Empezá siempre con `--action dry-run`
+- Empezá siempre con `--action dry-run` (genera el plan completo: destinos, colisiones y espacio real, sin tocar nada)
+- Revisá `all_files_audit.csv` y `REVIEW_DATE/` antes de borrar nada de `DUPLICATES_EXACT/`
 - Usá `copy` si querés conservar el backup original
+- `perceptual_policy: review_all` es lo seguro: nada perceptual se mueve a `UNIQUE` sin revisión
 - Subí al repo solo:
   - código
   - `config.example.yaml`

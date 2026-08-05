@@ -32,3 +32,10 @@ venv/
 env/
 .pytest_cache/
 .mypy_cache/
+
+# --- Herramientas / artefactos locales ---
+.opencode/
+*.egg-info/
+node_modules/
+session-*.md
+opencode.json
