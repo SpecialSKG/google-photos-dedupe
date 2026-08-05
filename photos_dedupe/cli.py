@@ -377,12 +377,20 @@ def main():
             logger.info(f"Found {len(all_files)} total media files")
 
         with timed_section(logger, "STEP 2/4 - Detección de duplicados"):
+            hash_cache_file = None
+            if config.use_hash_cache:
+                hash_cache_file = config.hash_cache_file or str(
+                    Path(config.out_dir) / ".photos_dedupe.hash_cache.json"
+                )
             deduplicator = Deduplicator(
                 mode=config.mode,
                 phash_threshold=config.phash_threshold,
-                workers=config.workers
+                workers=config.workers,
+                hash_cache_file=hash_cache_file
             )
             duplicate_groups = deduplicator.create_duplicate_groups(all_files)
+            if hash_cache_file:
+                deduplicator.hash_calc.save_cache(hash_cache_file)
 
             logger.info(f"Found {len(duplicate_groups)} duplicate groups")
 
