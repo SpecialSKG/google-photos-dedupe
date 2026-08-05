@@ -1,4 +1,6 @@
 """
+scanner.py
+
 File system scanning and auto-detection of Google Takeout folders.
 """
 
@@ -17,6 +19,7 @@ class Scanner:
     def __init__(self, ignore_json: bool = True):
         self.ignore_json = ignore_json
         self.detected_roots: List[str] = []
+        self.file_roots: dict = {}
     
     def auto_detect_photos_folder(self, input_dir: str) -> Optional[str]:
         """
@@ -34,9 +37,13 @@ class Scanner:
         # Common patterns to search for
         patterns = [
             "Takeout/Google Fotos",
+            "Takeout/Google\xa0Fotos",
             "Takeout/Google Photos",
+            "Takeout/Google\xa0Photos",
             "Google Fotos",
+            "Google\xa0Fotos",
             "Google Photos",
+            "Google\xa0Photos",
         ]
         
         for pattern in patterns:
@@ -57,19 +64,24 @@ class Scanner:
     def _contains_media_files(self, directory: str, max_depth: int = 2) -> bool:
         """Check if directory contains media files (quick check, not exhaustive)."""
         dir_path = Path(directory)
-        
-        for root, dirs, files in os.walk(dir_path):
+
+        for root, _dirs, files in os.walk(dir_path):
             # Limit depth for performance
-            depth = len(Path(root).relative_to(dir_path).parts)
+            try:
+                depth = len(Path(root).relative_to(dir_path).parts)
+            except Exception:
+                depth = 0
+
             if depth > max_depth:
                 continue
-            
+
             for file in files:
                 file_path = os.path.join(root, file)
                 if is_supported_media(file_path):
                     return True
-        
+
         return False
+
     
     def scan_directory(self, root_dir: str) -> List[str]:
         """
@@ -112,10 +124,15 @@ class Scanner:
         Returns:
             List of all media files found across all inputs
         """
+        self.detected_roots = []
+        self.file_roots = {}
+
         all_files = []
         
-        for input_dir in input_dirs:
-            logger.info(f"Processing input: {input_dir}")
+        total = len(input_dirs)
+        for idx, input_dir in enumerate(input_dirs, 1):
+            logger.info("")
+            logger.info(f"Processing input ({idx}/{total}): {input_dir}")
             
             # Determine the actual photos folder
             if photos_subpath:
@@ -136,9 +153,14 @@ class Scanner:
             
             # Scan the folder
             files = self.scan_directory(photos_folder)
+            for f in files:
+                self.file_roots[f] = photos_folder
             all_files.extend(files)
         
+        logger.info("")  # salto de línea visual
         logger.info(f"Total media files found: {len(all_files)}")
+        logger.info("")  # salto de línea visual
+
         return all_files
     
     def get_detected_roots(self) -> List[str]:
