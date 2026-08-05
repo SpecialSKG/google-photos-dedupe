@@ -1,4 +1,6 @@
 """
+cli.py
+
 Command-line interface for the photos deduplication tool.
 """
 
@@ -7,6 +9,7 @@ import logging
 import sys
 import time
 import warnings
+from datetime import datetime
 from contextlib import contextmanager
 from pathlib import Path
 from tqdm import tqdm
@@ -14,8 +17,15 @@ from photos_dedupe.config import Config
 from photos_dedupe.scanner import Scanner
 from photos_dedupe.dedupe import Deduplicator
 from photos_dedupe.reporters import Reporter
-from photos_dedupe.utils import safe_copy, safe_move
-from photos_dedupe.date_utils import get_capture_year_for_group
+from photos_dedupe.planner import (
+    BUCKET_UNIQUE,
+    BUCKET_DUPLICATES_EXACT,
+    BUCKET_REVIEW_PERCEPTUAL,
+    BUCKET_REVIEW_DATE,
+    build_plan,
+    write_manifests,
+    format_bytes,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,7 +33,7 @@ class TqdmLoggingHandler(logging.StreamHandler):
     def emit(self, record):
         try:
             msg = self.format(record)
-            tqdm.write(msg)  # respeta la barra de progreso
+            tqdm.write(msg, file=sys.stdout)  # clave
             self.flush()
         except Exception:
             self.handleError(record)
@@ -39,6 +49,30 @@ def format_duration(seconds: float) -> str:
     if m > 0:
         return f"{m}m {s}s"
     return f"{s}s"
+
+def make_run_dir(output_dir: Path) -> Path:
+    """Crea un subdirectorio run_<timestamp> dentro de output_dir (uno por ejecución)."""
+    output_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    run_dir = output_dir / f"run_{stamp}"
+    suffix = 2
+    while run_dir.exists():
+        # dos ejecuciones en el mismo segundo: desambiguar con _2, _3...
+        run_dir = output_dir / f"run_{stamp}_{suffix}"
+        suffix += 1
+    run_dir.mkdir(parents=True, exist_ok=True)
+    return run_dir
+
+def latest_run_dir(output_dir: Path) -> Path:
+    """Devuelve el subdirectorio run_* más reciente (o el base si no hay ninguno)."""
+    output_dir = Path(output_dir)
+    if not output_dir.is_dir():
+        return output_dir
+    runs = sorted(
+        (p for p in output_dir.iterdir() if p.is_dir() and p.name.startswith("run_")),
+        key=lambda p: p.name,
+    )
+    return runs[-1] if runs else output_dir
 
 @contextmanager
 def timed_section(logger, title: str, sep: str = "-"):
@@ -84,11 +118,16 @@ def setup_logging(log_dir: Path, verbose: bool = False) -> None:
     # Capturar warnings (PIL, etc.) y mandarlos al logging
     logging.captureWarnings(True)
     warnings.simplefilter("default")
-    warnings.filterwarnings("once", message="Truncated File Read")
-    warnings.filterwarnings("once", message="Image appears to be a malformed MPO file*")
+
+    # Si estos warnings te ensucian la terminal, ignorarlos es lo mejor
+    warnings.filterwarnings("ignore", message="Truncated File Read")
+    warnings.filterwarnings("ignore", message="Image appears to be a malformed MPO file*")
+
+    # Fase 11: silenciar los loggers DEBUG de PIL (evita logs de ~14 MB)
+    for pil_logger in ("PIL", "PIL.Image", "PIL.ImageFile", "PIL.TiffImagePlugin", "PIL.ImageSequence"):
+        logging.getLogger(pil_logger).setLevel(logging.WARNING)
 
     logger.info(f"Logging initialized. Log file: {log_file}")
-
 
 def log_config_pretty(config: Config) -> None:
     logger.info("-" * 80)
@@ -132,15 +171,15 @@ def parse_arguments() -> argparse.Namespace:
         description='Google Photos Deduplication Tool - Multi-account duplicate detection and consolidation',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
-Examples:
-  # Using config file (recommended)
-  python -m photos_dedupe --config config.yaml
-  
-  # Using CLI arguments
-  python -m photos_dedupe --inputs exports/account1 exports/account2 --out-dir output --mode exact+perceptual
-  
-  # Dry run to preview results
-  python -m photos_dedupe --config config.yaml --action dry-run
+            Examples:
+                # Using config file (recommended)
+                python -m photos_dedupe --config config.yaml
+                
+                # Using CLI arguments
+                python -m photos_dedupe --inputs exports/account1 exports/account2 --out-dir output --mode exact+perceptual
+
+                # Dry run to preview results
+                python -m photos_dedupe --config config.yaml --action dry-run
         """
     )
     
@@ -189,7 +228,14 @@ Examples:
     parser.add_argument(
         '--keep-structure',
         action='store_true',
+        default=None,
         help='Preserve directory structure in output'
+    )
+    
+    parser.add_argument(
+        '--confirm-move',
+        action='store_true',
+        help='Confirmar la accion move (destructiva): vacía los exports'
     )
     
     parser.add_argument(
@@ -202,112 +248,69 @@ Examples:
     return parser.parse_args()
 
 
-def process_files(files: list, action: str, unique_dir: Path, duplicates_dir: Path, 
-                 winners: list, duplicates: list, keep_structure: bool = False,
-                 config: Config = None, duplicate_groups: list = None) -> None:
-    """Process files according to the specified action.
-    
-    Args:
-        files: All files
-        action: Action to perform (copy, move, dry-run)
-        unique_dir: Base UNIQUE directory
-        duplicates_dir: Base DUPLICATES directory
-        winners: List of winner files
-        duplicates: List of duplicate files
-        keep_structure: Whether to preserve directory structure
-        config: Configuration object (for year-based organization)
-        duplicate_groups: List of DuplicateGroup objects (for group-based year assignment)
-    """
-    
-    if action == 'dry-run':
-        logger.info("DRY RUN MODE - No files will be moved or copied")
-        logger.info(f"Would copy {len(winners)} winners to UNIQUE/")
-        logger.info(f"Would copy {len(duplicates)} duplicates to DUPLICATES/")
-        return
-    
-    # Check if year-based organization is enabled
-    group_by_year = config and config.group_by_year
-    
-    # If group_by_year is enabled, we need to process by groups
-    if group_by_year and duplicate_groups:
-        logger.info("Organizing output by year (group-based)...")
-        
-        # Build a mapping of file paths to their group's year
-        file_to_year = {}
-        
-        for group in tqdm(duplicate_groups, desc="Determining years for groups"):
-            # Get year from the winner (authoritative source for the group)
-            winner_path = Path(group.winner)
-            group_year = get_capture_year_for_group(
-                winner_path,
-                config.date_source_priority,
-                config.unknown_year_dir,
-                config.timezone_mode
-            )
-            
-            # Assign this year to all files in the group
-            file_to_year[str(group.winner)] = group_year
-            for dup in group.duplicates:
-                file_to_year[str(dup)] = group_year
-        
-        # Process winners (unique files)
-        logger.info(f"Processing {len(winners)} winner files...")
-        for file_path in tqdm(winners, desc="Copying winners to UNIQUE/<YEAR>"):
-            try:
-                # Get year for this file (if it's part of a group)
-                year = file_to_year.get(str(file_path), config.unknown_year_dir)
-                
-                # Create year-based destination
-                year_unique_dir = unique_dir / year
-                
-                if action == 'copy':
-                    safe_copy(file_path, str(year_unique_dir), keep_structure)
-                elif action == 'move':
-                    safe_move(file_path, str(year_unique_dir), keep_structure)
-            except Exception as e:
-                logger.error(f"Error processing winner {file_path}: {e}")
-        
-        # Process duplicates
-        logger.info(f"Processing {len(duplicates)} duplicate files...")
-        for file_path in tqdm(duplicates, desc="Copying duplicates to DUPLICATES/<YEAR>"):
-            try:
-                # Get year for this file (should be in the mapping)
-                year = file_to_year.get(str(file_path), config.unknown_year_dir)
-                
-                # Create year-based destination
-                year_duplicates_dir = duplicates_dir / year
-                
-                if action == 'copy':
-                    safe_copy(file_path, str(year_duplicates_dir), keep_structure)
-                elif action == 'move':
-                    safe_move(file_path, str(year_duplicates_dir), keep_structure)
-            except Exception as e:
-                logger.error(f"Error processing duplicate {file_path}: {e}")
-    
-    else:
-        # Original behavior: no year-based organization
-        # Process winners (unique files)
-        logger.info(f"Processing {len(winners)} winner files...")
-        for file_path in tqdm(winners, desc="Copying winners to UNIQUE"):
-            try:
-                if action == 'copy':
-                    safe_copy(file_path, str(unique_dir), keep_structure)
-                elif action == 'move':
-                    safe_move(file_path, str(unique_dir), keep_structure)
-            except Exception as e:
-                logger.error(f"Error processing winner {file_path}: {e}")
-        
-        # Process duplicates
-        logger.info(f"Processing {len(duplicates)} duplicate files...")
-        for file_path in tqdm(duplicates, desc="Copying duplicates to DUPLICATES"):
-            try:
-                if action == 'copy':
-                    safe_copy(file_path, str(duplicates_dir), keep_structure)
-                elif action == 'move':
-                    safe_move(file_path, str(duplicates_dir), keep_structure)
-            except Exception as e:
-                logger.error(f"Error processing duplicate {file_path}: {e}")
+def execute_plan(plan, config: Config, run_dir: Path, action: str) -> dict:
+    """Ejecuta el plan (Fase 5) tal cual fue planificado.
 
+    - dry-run: no toca nada; solo informa y deja los manifiestos.
+    - copy: copia a planned_destination (resuelto contra run_dir).
+    - move: mueve (destructivo; ya validado por el guardia --confirm-move).
+    """
+    if action == "dry-run":
+        s = plan.summary
+        logger.info("DRY RUN MODE - No files will be moved or copied")
+        logger.info(f"UNIQUE: {s['counts'].get(BUCKET_UNIQUE, 0)}")
+        logger.info(f"DUPLICATES_EXACT: {s['counts'].get(BUCKET_DUPLICATES_EXACT, 0)}")
+        logger.info(f"REVIEW_PERCEPTUAL: {s['counts'].get(BUCKET_REVIEW_PERCEPTUAL, 0)}")
+        logger.info(f"REVIEW_DATE: {s['counts'].get(BUCKET_REVIEW_DATE, 0)}")
+        logger.info(f"Espacio recuperable (exacto, garantizado): {format_bytes(s['guaranteed_exact_savings_bytes'])}")
+        logger.info(f"Espacio potencial (perceptual, requiere revisión): {format_bytes(s['potential_perceptual_savings_bytes'])}")
+        logger.info("Plan completo en MANIFESTS/processing_plan.jsonl")
+        return {"dry_run": True}
+
+    for bucket in (BUCKET_UNIQUE, BUCKET_DUPLICATES_EXACT, BUCKET_REVIEW_PERCEPTUAL, BUCKET_REVIEW_DATE):
+        (run_dir / bucket).mkdir(parents=True, exist_ok=True)
+
+    results = {"copied": 0, "moved": 0, "failed": 0, "skipped": 0}
+    for op in tqdm(plan.operations, desc=f"Executing {action}", file=sys.stdout, dynamic_ncols=True):
+        if op.status != "planned":
+            results["skipped"] += 1
+            continue
+        src = op.source_path
+        dest = run_dir / op.planned_destination
+        try:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                # defensivo: jamás sobrescribir (no debería ocurrir en run_dir fresco)
+                logger.warning(f"Destino ya existía (se omite): {dest}")
+                op.status = "skipped"
+                op.error = "destination already exists"
+                results["skipped"] += 1
+                continue
+            if action == "copy":
+                import shutil as _sh
+                _sh.copy2(src, dest)
+                op.status = "copied"
+                results["copied"] += 1
+            elif action == "move":
+                import shutil as _sh
+                _sh.move(src, dest)
+                op.status = "moved"
+                results["moved"] += 1
+            # Fase 6: metadata planificada (audit/write) sobre la copia
+            if op.status in ("copied", "moved") and op.metadata_action != "none":
+                try:
+                    from photos_dedupe.metadata_writer import apply_metadata
+                    op.metadata_result = apply_metadata(op, config, run_dir)
+                except Exception as e:
+                    logger.error(f"Error en metadata de {src}: {e}")
+                    op.metadata_result = {"status": "WRITE_FAILED", "detail": str(e)[:200]}
+        except Exception as e:
+            logger.error(f"Error {action} {src} → {dest}: {e}")
+            op.status = "failed"
+            op.error = str(e)
+            results["failed"] += 1
+    logger.info(f"{action} completado: {results}")
+    return results
 
 def main():
     """Main entry point for the CLI."""
@@ -333,94 +336,161 @@ def main():
         print(f"Configuration error: {e}", file=sys.stderr)
         sys.exit(1)
 
+    # Guardia de seguridad para la accion destructiva
+    if config.action == 'move' and not args.confirm_move:
+        print(
+            "ADVERTENCIA: '--action move' MUEVE archivos desde los exports al out_dir y no se puede deshacer.\n"
+            "Ejecutá primero un dry-run y agregá '--confirm-move' para confirmar explícitamente.",
+            file=sys.stderr,
+        )
+        sys.exit(2)
+
     start_total = time.perf_counter()
+    exit_code = 0
+    results = {}
     
-    # Setup output directories (ANTES del logging)
-    output_dir = Path(config.out_dir)
-    unique_dir = output_dir / "UNIQUE"
-    duplicates_dir = output_dir / "DUPLICATES"
-    logs_dir = output_dir / "LOGS"
+    # Setup output directories (ANTES del logging): cada ejecución crea su own subdirectorio run_<timestamp>
+    base_dir = Path(config.out_dir)
+    run_dir = make_run_dir(base_dir)
+    logs_dir = run_dir / "LOGS"
 
     # Setup logging (ANTES de usar timed_section)
     setup_logging(logs_dir, args.verbose)
 
-    with timed_section(logger, "STEP 0/4 - Inicialización"):
-        logger.info("=" * 80)
-        logger.info("Google Photos Deduplication Tool")
-        logger.info("=" * 80)
-        log_config_pretty(config)
+    try:
+        with timed_section(logger, "STEP 0/4 - Inicialización"):
+            logger.info("=" * 80)
+            logger.info("Google Photos Deduplication Tool")
+            logger.info("=" * 80)
+            log_config_pretty(config)
     
-    with timed_section(logger, "STEP 1/4 - Escaneo de archivos"):
-        # Step 1: Scan for files
-        #logger.info("Step 1: Scanning for media files...")
-        scanner = Scanner(ignore_json=config.ignore_json)
-        all_files = scanner.scan_inputs(config.inputs, config.photos_subpath)
+        with timed_section(logger, "STEP 1/4 - Escaneo de archivos"):
+            # Step 1: Scan for files
+            #logger.info("Step 1: Scanning for media files...")
+            scanner = Scanner(ignore_json=config.ignore_json)
+            all_files = scanner.scan_inputs(config.inputs, config.photos_subpath)
     
-        if not all_files:
-            logger.error("No media files found!")
-            sys.exit(1)
+            if not all_files:
+                logger.error("No media files found!")
+                sys.exit(1)
     
-        logger.info(f"Found {len(all_files)} total media files")
+            logger.info(f"Found {len(all_files)} total media files")
+
+        with timed_section(logger, "STEP 2/4 - Detección de duplicados"):
+            deduplicator = Deduplicator(
+                mode=config.mode,
+                phash_threshold=config.phash_threshold,
+                workers=config.workers
+            )
+            duplicate_groups = deduplicator.create_duplicate_groups(all_files)
+
+            logger.info(f"Found {len(duplicate_groups)} duplicate groups")
+
+            # Fase 5: builder del plan inmutable (fechas, buckets, destinos, invariantes)
+            plan = build_plan(all_files, duplicate_groups, config, scanner)
+
+            if plan.invariant_violations:
+                logger.error("INVARIANTES DEL PLAN VIOLADAS — abortando por seguridad:")
+                for v in plan.invariant_violations[:50]:
+                    logger.error(f"  - {v}")
+                raise RuntimeError("invariant violations in plan; refusing to continue")
+
+            s = plan.summary
+            logger.info("=== PLAN (Fase 5) ===")
+            for bucket in (BUCKET_UNIQUE, BUCKET_DUPLICATES_EXACT, BUCKET_REVIEW_PERCEPTUAL, BUCKET_REVIEW_DATE):
+                c = s["counts"].get(bucket, 0)
+                if c:
+                    logger.info(f"  {bucket}: {c} archivos")
+            logger.info(f"  Ahorro exacto garantizado: {format_bytes(s['guaranteed_exact_savings_bytes'])}")
+            logger.info(f"  Ahorro perceptual potencial: {format_bytes(s['potential_perceptual_savings_bytes'])}")
+            if s["requires_review_count"]:
+                logger.info(f"  Requieren revisión manual: {s['requires_review_count']}")
+
+            write_manifests(plan, run_dir / "MANIFESTS", config, run_dir)
+            logger.info(f"Manifiestos escritos en {run_dir / 'MANIFESTS'}")
+
+            winners = deduplicator.get_all_winners()
+            duplicates = deduplicator.get_all_duplicates()
+            unique_files = deduplicator.get_unique_files(all_files)
+
+            # All unique files + winners should go to UNIQUE folder
+            all_unique = unique_files + winners
+
+            logger.info(f"Unique files: {len(all_unique)}")
+            logger.info(f"Duplicate files: {len(duplicates)}")
     
-    with timed_section(logger, "STEP 2/4 - Detección de duplicados"):
-        # Step 2: Detect duplicates
-        #logger.info("Step 2: Detecting duplicates...")
-        deduplicator = Deduplicator(mode=config.mode, phash_threshold=config.phash_threshold)
-        duplicate_groups = deduplicator.create_duplicate_groups(all_files)
+        with timed_section(logger, "STEP 3/4 - Generación de reportes"):
+            # Step 3: Generate reports
+            reporter = Reporter(str(run_dir))
+            reporter.generate_all_reports(
+                groups=duplicate_groups,
+                total_files=len(all_files),
+                unique_files=len(all_unique),
+                detected_roots=scanner.get_detected_roots(),
+                mode=config.mode,
+                action=config.action,
+                config=config,
+                plan=plan,
+            )
     
-        winners = deduplicator.get_all_winners()
-        duplicates = deduplicator.get_all_duplicates()
-        unique_files = deduplicator.get_unique_files(all_files)
-    
-        # All unique files + winners should go to UNIQUE folder
-        all_unique = unique_files + winners
-    
-        logger.info(f"Found {len(duplicate_groups)} duplicate groups")
-        logger.info(f"Unique files: {len(all_unique)}")
-        logger.info(f"Duplicate files: {len(duplicates)}")
-    
-    with timed_section(logger, "STEP 3/4 - Generación de reportes"):
-        # Step 3: Generate reports
-        #logger.info("Step 3: Generating reports...")
-        reporter = Reporter(str(output_dir))
-        reporter.generate_all_reports(
-            groups=duplicate_groups,
-            total_files=len(all_files),
-            unique_files=len(all_unique),
-            detected_roots=scanner.get_detected_roots(),
-            mode=config.mode,
-            action=config.action,
-            config=config
-        )
-    
-    with timed_section(logger, "STEP 4/4 - Procesamiento de archivos"):
-        # Step 4: Process files
-        #logger.info("Step 4: Processing files...")
-        process_files(
-            files=all_files,
-            action=config.action,
-            unique_dir=unique_dir,
-            duplicates_dir=duplicates_dir,
-            winners=all_unique,
-            duplicates=duplicates,
-            keep_structure=config.keep_structure,
-            config=config,
-            duplicate_groups=duplicate_groups
-        )
-    
-    with timed_section(logger, "Summary"):
-        # Summary
-        logger.info("=" * 80)
-        logger.info("COMPLETED SUCCESSFULLY")
-        logger.info("=" * 80)
-        logger.info(f"Output directory: {output_dir}")
-        logger.info(f"Unique files: {len(all_unique)}")
-        logger.info(f"Duplicate files: {len(duplicates)}")
-        logger.info(f"Reports saved to: {output_dir / 'REPORTS'}")
-        logger.info(f"Logs saved to: {logs_dir}")
-        logger.info("=" * 80)
-        total_elapsed = time.perf_counter() - start_total
-        logger.info(f"Tiempo total: {format_duration(total_elapsed)}")
+        with timed_section(logger, "STEP 4/4 - Procesamiento de archivos"):
+            # Step 4: ejecutar el plan (dry-run no toca nada)
+            results = execute_plan(
+                plan=plan,
+                config=config,
+                run_dir=run_dir,
+                action=config.action,
+            )
+            failed = results.get("failed", 0)
+            if failed:
+                logger.error(f"{failed} operaciones fallaron — revisá el log.")
+
+        with timed_section(logger, "Summary"):
+            # Summary
+            status_line = "=" * 80
+            s = plan.summary
+            failed = results.get("failed", 0)
+            warnings = s["requires_review_count"]
+            if failed:
+                final_status = "FAILED"
+                exit_code = 1
+            elif warnings:
+                final_status = "COMPLETED WITH WARNINGS"
+                exit_code = 0
+            else:
+                final_status = "COMPLETED SUCCESSFULLY"
+                exit_code = 0
+            logger.info(status_line)
+            logger.info(final_status)
+            logger.info(status_line)
+            logger.info(f"Output directory: {run_dir}")
+            logger.info(f"Archivos planificados: {s['total']}")
+            logger.info(f"  UNIQUE: {s['counts'].get(BUCKET_UNIQUE, 0)}")
+            logger.info(f"  DUPLICATES_EXACT: {s['counts'].get(BUCKET_DUPLICATES_EXACT, 0)}")
+            logger.info(f"  REVIEW_PERCEPTUAL: {s['counts'].get(BUCKET_REVIEW_PERCEPTUAL, 0)}")
+            logger.info(f"  REVIEW_DATE: {s['counts'].get(BUCKET_REVIEW_DATE, 0)}")
+            logger.info(f"Ahorro exacto garantizado: {format_bytes(s['guaranteed_exact_savings_bytes'])}")
+            if failed:
+                logger.error(f"{failed} operaciones fallaron")
+            if warnings:
+                logger.warning(f"{warnings} archivos requieren revisión manual")
+            logger.info(f"Reports saved to: {run_dir / 'REPORTS'}")
+            logger.info(f"Manifiestos en: {run_dir / 'MANIFESTS'}")
+            logger.info(f"Logs saved to: {logs_dir}")
+            logger.info(status_line)
+            total_elapsed = time.perf_counter() - start_total
+            logger.info(f"Tiempo total: {format_duration(total_elapsed)}")
+            logger.info(status_line)
+
+    except KeyboardInterrupt:
+        logger.warning("Cancelado por el usuario (CTRL+C).")
+        sys.exit(130)
+    except Exception:
+        logger.exception("Error inesperado ejecutando photos_dedupe (ver traceback).")
+        logger.error(f"TIP: revisá {logs_dir / 'run.log'} para el detalle completo.")
+        sys.exit(1)
+
+    sys.exit(exit_code)
 
 if __name__ == "__main__":
     main()
