@@ -39,3 +39,13 @@ env/
 node_modules/
 session-*.md
 opencode.json
+opencode.backup_*.json
+
+# MCP locales
+.mcp/
+
+# Estado del MCP
+.mcp-state/
+
+# Empaquetado MCP
+*.zip
