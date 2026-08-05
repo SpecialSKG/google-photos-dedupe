@@ -1,4 +1,6 @@
 """
+reporters.py
+
 Report generation for deduplication results.
 """
 
@@ -351,6 +353,48 @@ class Reporter:
         logger.info(f"Excel report generated: {xlsx_path}")
         return str(xlsx_path)
     
+    def generate_audit(self, plan) -> str:
+        """
+        (Fase 7) Auditoría por archivo: TODOS los archivos escaneados, no solo duplicados.
+        Se alimenta del plan inmutable (processing_plan.jsonl).
+        """
+        audit_path = self.reports_dir / "all_files_audit.csv"
+        fieldnames = [
+            'file_id', 'source_path', 'source_account', 'classification',
+            'detection_type', 'output_bucket', 'output_year', 'selected_date_source',
+            'date_confidence', 'requires_review', 'review_reason',
+            'canonical_group_date', 'individual_date',
+            'planned_destination', 'collision_strategy', 'metadata_action',
+            'metadata_status', 'status', 'error',
+        ]
+        with open(audit_path, 'w', newline='', encoding='utf-8') as csvfile:
+            writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+            writer.writeheader()
+            for op in plan.operations:
+                writer.writerow({
+                    'file_id': op.file_id,
+                    'source_path': op.source_path,
+                    'source_account': op.source_account,
+                    'classification': op.classification,
+                    'detection_type': op.detection_type,
+                    'output_bucket': op.output_bucket,
+                    'output_year': op.output_year,
+                    'selected_date_source': op.selected_date_source,
+                    'date_confidence': op.date_confidence,
+                    'requires_review': op.requires_review,
+                    'review_reason': op.review_reason,
+                    'canonical_group_date': op.canonical_group_date or "",
+                    'individual_date': op.individual_date or "",
+                    'planned_destination': op.planned_destination,
+                    'collision_strategy': op.collision_strategy,
+                    'metadata_action': op.metadata_action,
+                    'metadata_status': (op.metadata_result or {}).get("status", ""),
+                    'status': op.status,
+                    'error': op.error,
+                })
+        logger.info(f"Audit report generated: {audit_path}")
+        return str(audit_path)
+
     def generate_summary(self, 
                         total_files: int,
                         unique_files: int,
@@ -358,7 +402,8 @@ class Reporter:
                         total_duplicates: int,
                         detected_roots: List[str],
                         mode: str,
-                        action: str) -> str:
+                        action: str,
+                        plan=None) -> str:
         """
         Generate text summary report.
         
@@ -391,17 +436,53 @@ class Reporter:
             f.write(f"Duplicate groups found: {duplicate_groups}\n")
             f.write(f"Total duplicate files: {total_duplicates}\n")
             f.write("\n")
-            
-            space_saved = 0  # Could calculate actual space saved
-            f.write(f"Space that can be saved: {space_saved} bytes\n")
-            f.write("\n")
+
+            if plan is not None:
+                s = plan.summary
+                from photos_dedupe.planner import (
+                    BUCKET_UNIQUE, BUCKET_DUPLICATES_EXACT,
+                    BUCKET_REVIEW_PERCEPTUAL, BUCKET_REVIEW_DATE,
+                    format_bytes,
+                )
+                f.write("PLAN (Fase 5) - BUCKETS\n")
+                f.write("-" * 80 + "\n")
+                f.write(f"UNIQUE:            {s['counts'].get(BUCKET_UNIQUE, 0)} archivos\n")
+                f.write(f"DUPLICATES_EXACT:  {s['counts'].get(BUCKET_DUPLICATES_EXACT, 0)} archivos\n")
+                f.write(f"REVIEW_PERCEPTUAL: {s['counts'].get(BUCKET_REVIEW_PERCEPTUAL, 0)} archivos\n")
+                f.write(f"REVIEW_DATE:       {s['counts'].get(BUCKET_REVIEW_DATE, 0)} archivos\n")
+                f.write("\n")
+
+                # Fase 9: resumen por estado de ejecución
+                status_counts = {}
+                for op in plan.operations:
+                    status_counts[op.status] = status_counts.get(op.status, 0) + 1
+                if status_counts:
+                    f.write("ESTADOS DE EJECUCIÓN\n")
+                    f.write("-" * 80 + "\n")
+                    for st, n in sorted(status_counts.items()):
+                        f.write(f"{st}: {n}\n")
+                    f.write("\n")
+
+                # Fase 8: espacio real
+                f.write("ESPACIO RECUPERABLE\n")
+                f.write("-" * 80 + "\n")
+                f.write(f"Ahorro exacto garantizado (DUPLICATES_EXACT): {format_bytes(s['guaranteed_exact_savings_bytes'])}\n")
+                f.write(f"Ahorro perceptual potencial (REVIEW_PERCEPTUAL): {format_bytes(s['potential_perceptual_savings_bytes'])}\n")
+                f.write(f"Bytes en revisión de fecha (REVIEW_DATE): {format_bytes(s['review_date_bytes'])}\n")
+                f.write("\n")
+            else:
+                space_saved = 0  # Could calculate actual space saved
+                f.write(f"Space that can be saved: {space_saved} bytes\n")
+                f.write("\n")
             
             f.write("OUTPUT STRUCTURE\n")
             f.write("-" * 80 + "\n")
-            f.write(f"UNIQUE/      - {unique_files} unique files\n")
-            f.write(f"DUPLICATES/  - {total_duplicates} duplicate files\n")
-            f.write(f"REPORTS/     - CSV, JSON, and this summary\n")
-            f.write(f"LOGS/        - Detailed execution logs\n")
+            f.write(f"UNIQUE/            - {unique_files} unique files\n")
+            f.write(f"DUPLICATES_EXACT/  - duplicate files (exactos, borrables)\n")
+            f.write(f"REVIEW_PERCEPTUAL/ - candidatos perceptuales a revisar\n")
+            f.write(f"REVIEW_DATE/       - archivos sin evidencia de fecha sólida\n")
+            f.write(f"REPORTS/           - CSV, JSON, auditoría y este resumen\n")
+            f.write(f"LOGS/              - Detalle de ejecución\n")
             f.write("\n")
             
             f.write("=" * 80 + "\n")
@@ -416,9 +497,10 @@ class Reporter:
                             detected_roots: List[str],
                             mode: str,
                             action: str,
-                            config=None) -> None:
+                            config=None,
+                            plan=None) -> None:
         """Generate all reports (CSV, JSON, Excel, and summary).
-        
+
         Args:
             groups: List of DuplicateGroup objects
             total_files: Total number of files scanned
@@ -427,7 +509,12 @@ class Reporter:
             mode: Detection mode used
             action: Action performed
             config: Configuration object (needed for Excel and conditional generation)
+            plan: Plan inmutable (Fase 5) — habilita auditoría por archivo, espacio real y resumen por estado
         """
+        # Fase 7: auditoría por archivo (siempre que haya plan)
+        if plan is not None:
+            self.generate_audit(plan)
+
         # Conditionally generate reports based on config flags
         if config:
             if config.reports_csv:
@@ -463,6 +550,7 @@ class Reporter:
             total_duplicates=duplicate_count,
             detected_roots=detected_roots,
             mode=mode,
-            action=action
+            action=action,
+            plan=plan,
         )
 
