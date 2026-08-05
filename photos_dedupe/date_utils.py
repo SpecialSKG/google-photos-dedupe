@@ -163,9 +163,16 @@ def _read_exif_datetimes(media_path: Path) -> List[Tuple[str, datetime]]:
                     return str(tag_id)
                 return ExifTags.TAGS.get(tag_id, str(tag_id))
 
+            # IFD0 + sub-IFD EXIF (0x8769). Los tags DateTime* reales (cámaras,
+            # ExifTool) viven en el sub-IFD; PIL solo expone ese mapa con get_ifd().
             exif_map = {}
+            try:
+                for tag_id, value in exif.get_ifd(0x8769).items():
+                    exif_map[_tag_name(tag_id)] = value
+            except Exception:
+                pass
             for tag_id, value in exif.items():
-                exif_map[_tag_name(tag_id)] = value
+                exif_map.setdefault(_tag_name(tag_id), value)
 
             results = []
             for exif_key, source in (
@@ -276,10 +283,19 @@ def parse_filename_date(filename: str) -> Optional[datetime]:
 # Timezone helpers
 # -----------------------------
 def to_utc(naive: datetime) -> datetime:
-    """Interpreta un datetime naive como local (para representación) y devuelve UTC aware."""
+    """Interpreta un datetime naive como hora LOCAL de la máquina y lo convierte a UTC.
+
+    EXIF/QuickTime guardan hora de pared de la cámara (sin zona). Interpretarla
+    como local (la cámara suele estar en la zona de la máquina) y convertirla a
+    UTC permite compararla con photoTakenTime (que sí es UTC) sin falsos
+    conflictos. La versión anterior estampaba UTC a secas: con la máquina en
+    UTC-6, un EXIF 06:55 (México) vs photoTakenTime 12:55 UTC daba un conflicto
+    falso de 21600s en ~4.5k archivos.
+    """
     if naive.tzinfo is not None:
         return naive.astimezone(timezone.utc)
-    return naive.replace(tzinfo=timezone.utc)
+    local_tz = datetime.now().astimezone().tzinfo
+    return naive.replace(tzinfo=local_tz).astimezone(timezone.utc)
 
 
 def _from_ts_utc(ts: int) -> datetime:
